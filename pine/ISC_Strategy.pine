@@ -106,7 +106,7 @@ bool bullLS = false
 bool bearLS = false
 
 if array.size(liqLows) > 0
-    for i = array.size(liqLows) - 1 to 0 by -1
+    for i = array.size(liqLows) - 1 to 0
         lvl = array.get(liqLows, i)
         if close < lvl
             array.remove(liqLows, i)
@@ -118,7 +118,7 @@ if array.size(liqLows) > 0
             break
 
 if array.size(liqHighs) > 0
-    for i = array.size(liqHighs) - 1 to 0 by -1
+    for i = array.size(liqHighs) - 1 to 0
         lvl = array.get(liqHighs, i)
         if close > lvl
             array.remove(liqHighs, i)
