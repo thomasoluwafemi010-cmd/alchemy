@@ -78,7 +78,7 @@ if bearBreak
 
 // --------------------- Liquidity registers + sweeps --------------------------
 var float[] liqHighs    = array.new_float()
-var float[] liqHighBars = array.new_int()
+var int[]   liqHighBars = array.new_int()
 var float[] liqLows     = array.new_float()
 var int[]   liqLowBars  = array.new_int()
 
