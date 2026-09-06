@@ -3,26 +3,29 @@
 //  ISC 1.0 - INTELLIGENT STRATEGIES CONNOISSEUR TRADER [MSNRUZ]
 //  Confluence indicator built from the ISC 1.0 ebook (51 pages, msnr.uz)
 //
-//  Modules implemented (book page references):
-//    1) SMC  - Market Structure : HH/HL/LH/LL, BOS, CHOCH        (pp. 11-12)
-//    2) MSNR - Key Zones        : S/R zones, RBS / SBR flips     (pp. 3-5)
-//    3) LiT  - Liquidity        : Liquidity Sweeps (inducement)  (pp. 13-16)
-//    4) ICT  - Kill Zones       : Asia Range box, London / NY KZ (pp. 26-28)
-//    5) QT   - Quarterly Theory : AMDX 90-minute micro cycles    (pp. 35-38)
-//    6) SMT  - Divergence       : correlated pair confirmation   (pp. 46-49)
+//  STRICT TOP-DOWN ANALYSIS (p.16):
+//    0. HTF bias  : structure trend on the higher timeframe sets direction
+//    1. HTF POI   : price must trade into the HTF MSNR zone (demand/supply)
+//    2. ERL       : external range liquidity must lie in the trade direction
+//    3. LTF entry : liquidity sweep (inducement) -> CHOCH / BOS -> entry
+//    + optional confluence: ICT Kill Zone, AMDX phase, SMT divergence
+//
+//  Book page references:
+//    0) Top-Down : HTF POI -> LTF entry mapping, ERL          (p.16)
+//    1) SMC      - Market Structure : HH/HL/LH/LL, BOS, CHOCH (pp.11-12)
+//    2) MSNR     - Key Zones        : S/R zones, RBS / SBR    (pp.3-5)
+//    3) LiT      - Liquidity        : sweeps / inducement     (pp.13-16)
+//    4) ICT      - Kill Zones       : Asia Range, London / NY (pp.26-28)
+//    5) QT       - Quarterly Theory : AMDX 90-min cycles      (pp.35-38)
+//    6) SMT      - Divergence       : correlated pairs        (pp.46-49)
 //    7) Confluence entry signals + alerts
 //
-//  Core ISC logic encoded (p. 13-16):
-//    liquidity sweep (inducement cleared)  ->  CHOCH / BOS  ->  entry
-//    "Every POI must be preceded by inducement."
-//
-//  Use on INTRADAY timeframes (M1-H1) for sessions / AMDX features.
-//  Educational tool only - not financial advice.
+//  Use on INTRADAY timeframes (M1-H1). Educational tool - not financial advice.
 // =============================================================================
 indicator("ISC 1.0 - Intelligent Strategies Connoisseur Trader [MSNRUZ]", "ISC Confluence", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
 
 // ----------------------------- Inputs ----------------------------------------
-grpG   = "Display"
+grpTD   = "0) Top-Down - HTF bias / POI / ERL (p.16)"
 grpSMC  = "1) SMC - Market Structure (pp.11-12)"
 grpMSNR = "2) MSNR - Key Zones (pp.3-5)"
 grpLiT  = "3) LiT - Liquidity / Inducement (pp.13-16)"
@@ -30,6 +33,16 @@ grpICT  = "4) ICT - Kill Zones (pp.26-28)"
 grpQT   = "5) QT - Quarterly Theory AMDX (pp.35-38)"
 grpSMT  = "6) SMT - Divergence (pp.46-49)"
 grpSig  = "7) Confluence Signals"
+grpG    = "Display"
+
+showHTF    = input.bool(true, "Show HTF POI zone + ERL levels", group = grpTD)
+enforceHTF = input.bool(true, "STRICT top-down: HTF bias + HTF POI + ERL required", group = grpTD, tooltip = "Signals only fire in the HTF trend direction, while price is interacting with the HTF POI zone, and with ERL (external range liquidity) lying in the trade direction (p.16).")
+htfMode    = input.string("Auto", "Higher timeframe", options = ["Auto", "15", "30", "60", "120", "240", "D", "W", "M"], group = grpTD, tooltip = "Auto follows the book's p.16 mapping: M1/M5 -> H1, M15 -> H4, H1/H4 -> D1, above -> W")
+htfSwing   = input.int(10, "HTF swing length (bias structure)", minval = 2, group = grpTD)
+htfZone    = input.int(20, "HTF zone length (POI pivots)", minval = 2, group = grpTD)
+htfZoneW   = input.float(0.05, "HTF POI thickness (% of price)", minval = 0.0, step = 0.01, group = grpTD)
+erlLen     = input.int(20, "ERL lookback (HTF bars)", minval = 5, group = grpTD)
+poiWindow  = input.int(12, "HTF POI valid for N chart bars after touch", minval = 1, group = grpTD)
 
 showStructure = input.bool(true, "Structure: HH/HL/LH/LL + BOS + CHOCH", group = grpSMC)
 swingLen      = input.int(10, "Swing length (structure & liquidity)", minval = 2, group = grpSMC)
@@ -63,6 +76,126 @@ corrSym = input.symbol("XAGUSD", "Correlated symbol (XAU->XAG, EUR->GBP ...)", g
 reqKZ   = input.bool(false, "Signals only inside Kill Zones", group = grpSig)
 reqAMDX = input.bool(false, "Signals only in M or D phase (AMDX)", group = grpSig)
 reqSMT  = input.bool(false, "Signals only with SMT agreement", group = grpSig)
+
+// --------------------- 0) Top-Down: HTF bias / POI / ERL (p.16) --------------
+// Book mapping (p.16): D1 POI -> entry H4/H1 - H4 POI -> entry M15/M5
+//                     H1 POI -> entry M5/M1 - M15 POI -> entry M1
+f_autoHtf() =>
+    s = timeframe.in_seconds(timeframe.period)
+    s <= 300 ? "60" : s <= 900 ? "240" : s <= 14400 ? "D" : "W"
+
+f_htfTF() =>
+    string tf = f_autoHtf()
+    if htfMode != "Auto"
+        if timeframe.in_seconds(htfMode) > timeframe.in_seconds(timeframe.period)
+            tf := htfMode
+    tf
+
+simple string htfTF = f_htfTF()
+
+// Runs entirely in the HTF context via request.security:
+//   hTrend : HTF structure trend (1 bull / -1 bear / 0 unknown)  -> bias
+//   demand / supply zones from the latest HTF pivots             -> POI
+//   ERL : highest high / lowest low of last erlLen HTF bars      -> draw
+f_htfAnalysis() =>
+    var int   hTrend  = 0
+    var float hRefH   = na
+    var float hRefL   = na
+    float hPH = ta.pivothigh(high, htfSwing, htfSwing)
+    float hPL = ta.pivotlow(low, htfSwing, htfSwing)
+    if not na(hPH)
+        hRefH := hPH
+    if not na(hPL)
+        hRefL := hPL
+    if not na(hRefH) and close > hRefH
+        hTrend := 1
+        hRefH := na
+    if not na(hRefL) and close < hRefL
+        hTrend := -1
+        hRefL := na
+    var float hLastPL = na
+    var float hLastPH = na
+    float zPL = ta.pivotlow(low, htfZone, htfZone)
+    float zPH = ta.pivothigh(high, htfZone, htfZone)
+    if not na(zPL)
+        hLastPL := zPL
+    if not na(zPH)
+        hLastPH := zPH
+    float zw = close * htfZoneW / 100.0
+    [hTrend, hLastPL + zw, hLastPL - zw, hLastPH + zw, hLastPH - zw, ta.highest(high, erlLen), ta.lowest(low, erlLen)]
+
+[hTrendH, hDemTop, hDemBot, hSupTop, hSupBot, hErlUp, hErlDn] = request.security(syminfo.tickerid, htfTF, f_htfAnalysis())
+
+// POI interaction state (chart timeframe):
+//   touch  = wick into the zone while close holds outside-broken side
+//   broken = close beyond the far edge -> zone invalid until a new one forms
+var int sinceDemTouch = na
+var int sinceSupTouch = na
+
+if not na(hDemBot)
+    if close < hDemBot
+        sinceDemTouch := na
+    else if low <= hDemTop
+        sinceDemTouch := 0
+    else if not na(sinceDemTouch)
+        sinceDemTouch += 1
+
+if not na(hSupTop)
+    if close > hSupTop
+        sinceSupTouch := na
+    else if high >= hSupBot
+        sinceSupTouch := 0
+    else if not na(sinceSupTouch)
+        sinceSupTouch += 1
+
+bool htfLongOK  = not enforceHTF or hTrendH == 1
+bool htfShortOK = not enforceHTF or hTrendH == -1
+bool demPOIOK   = not enforceHTF or (not na(sinceDemTouch) and sinceDemTouch <= poiWindow)
+bool supPOIOK   = not enforceHTF or (not na(sinceSupTouch) and sinceSupTouch <= poiWindow)
+bool erlLongOK  = not enforceHTF or na(hErlUp) or hErlUp > close
+bool erlShortOK = not enforceHTF or na(hErlDn) or hErlDn < close
+
+// draw HTF POI zones + ERL
+var box  hDemBox    = na
+var box  hSupBox    = na
+var line hErlUpLine = na
+var line hErlDnLine = na
+
+if showHTF and not na(hDemTop)
+    if na(hDemBox)
+        hDemBox := box.new(bar_index, hDemTop, bar_index, hDemBot, border_color = color.new(bullCol, 55), bgcolor = color.new(bullCol, 90), text = "HTF demand POI", text_color = color.new(bullCol, 30), text_size = size.tiny, text_halign = text.align_right)
+    box.set_left(hDemBox, math.max(0, bar_index - 60))
+    box.set_right(hDemBox, bar_index + 8)
+    box.set_top(hDemBox, hDemTop)
+    box.set_bottom(hDemBox, hDemBot)
+
+if showHTF and not na(hSupTop)
+    if na(hSupBox)
+        hSupBox := box.new(bar_index, hSupTop, bar_index, hSupBot, border_color = color.new(bearCol, 55), bgcolor = color.new(bearCol, 90), text = "HTF supply POI", text_color = color.new(bearCol, 30), text_size = size.tiny, text_halign = text.align_right)
+    box.set_left(hSupBox, math.max(0, bar_index - 60))
+    box.set_right(hSupBox, bar_index + 8)
+    box.set_top(hSupBox, hSupTop)
+    box.set_bottom(hSupBox, hSupBot)
+
+if showHTF and not na(hErlUp)
+    if na(hErlUpLine)
+        hErlUpLine := line.new(bar_index, hErlUp, bar_index + 1, hErlUp, color = color.gray, style = line.style_dashed)
+    line.set_xy1(hErlUpLine, bar_index - 5, hErlUp)
+    line.set_xy2(hErlUpLine, bar_index, hErlUp)
+    line.set_extend(hErlUpLine, extend.right)
+
+if showHTF and not na(hErlDn)
+    if na(hErlDnLine)
+        hErlDnLine := line.new(bar_index, hErlDn, bar_index + 1, hErlDn, color = color.gray, style = line.style_dashed)
+    line.set_xy1(hErlDnLine, bar_index - 5, hErlDn)
+    line.set_xy2(hErlDnLine, bar_index, hErlDn)
+    line.set_extend(hErlDnLine, extend.right)
+
+if showHTF and barstate.islast
+    if not na(hErlUp)
+        label.new(bar_index + 8, hErlUp, "ERL", style = label.style_label_left, color = color.new(color.gray, 100), textcolor = color.gray, size = size.tiny)
+    if not na(hErlDn)
+        label.new(bar_index + 8, hErlDn, "ERL", style = label.style_label_left, color = color.new(color.gray, 100), textcolor = color.gray, size = size.tiny)
 
 // --------------------- 1) SMC - Market Structure (pp.11-12) ------------------
 ph = ta.pivothigh(high, swingLen, swingLen)
@@ -362,16 +495,16 @@ if not na(ph)
         label.new(bar_index - swingLen, ph, "SMT", style = label.style_label_down, color = color.new(bearCol, 25), textcolor = color.white, size = size.tiny)
     prevLocalPH := ph
 
-// --------------------- 7) Confluence signals (p.2, p.11) ---------------------
-// Long : sell-side sweep (inducement) then bullish CHOCH / BOS, filters aligned
-// Short: buy-side sweep (inducement) then bearish CHOCH / BOS, filters aligned
+// --------------------- 7) Confluence signals (p.2, p.11, p.16) ---------------
+// Strict top-down order: HTF bias -> HTF POI -> ERL room -> sweep (inducement)
+//                        -> CHOCH/BOS -> optional KZ / AMDX / SMT filters
 bool kzOK   = not reqKZ or inLondon or inNY
 bool amdxOK = not reqAMDX or phase == "M" or phase == "D"
 bool smtOKL = not reqSMT or smtBias == 1
 bool smtOKS = not reqSMT or smtBias == -1
 
-bool longSignal  = ((bullChoch and freshBullSweep) or (bullLS and trend == 1)) and kzOK and amdxOK and smtOKL
-bool shortSignal = ((bearChoch and freshBearSweep) or (bearLS and trend == -1)) and kzOK and amdxOK and smtOKS
+bool longSignal  = ((bullChoch and freshBullSweep) or (bullLS and trend == 1)) and htfLongOK and demPOIOK and erlLongOK and kzOK and amdxOK and smtOKL
+bool shortSignal = ((bearChoch and freshBearSweep) or (bearLS and trend == -1)) and htfShortOK and supPOIOK and erlShortOK and kzOK and amdxOK and smtOKS
 
 if longSignal
     label.new(bar_index, low, "ISC LONG", style = label.style_label_up, color = bullCol, textcolor = color.white, size = size.small)
@@ -380,8 +513,12 @@ if shortSignal
     label.new(bar_index, high, "ISC SHORT", style = label.style_label_down, color = bearCol, textcolor = color.white, size = size.small)
 
 // --------------------- Alerts -------------------------------------------------
-alertcondition(longSignal, "ISC Long Entry", "ISC Confluence: LONG - sweep + CHOCH aligned")
-alertcondition(shortSignal, "ISC Short Entry", "ISC Confluence: SHORT - sweep + CHOCH aligned")
+alertcondition(longSignal, "ISC Long Entry", "ISC Confluence: LONG - top-down + sweep + CHOCH aligned")
+alertcondition(shortSignal, "ISC Short Entry", "ISC Confluence: SHORT - top-down + sweep + CHOCH aligned")
+alertcondition(hTrendH == 1 and hTrendH[1] == -1, "HTF bias flipped Bullish", "ISC: HTF bias flipped bullish - longs allowed")
+alertcondition(hTrendH == -1 and hTrendH[1] == 1, "HTF bias flipped Bearish", "ISC: HTF bias flipped bearish - shorts allowed")
+alertcondition(not na(sinceDemTouch) and sinceDemTouch == 0, "Price at HTF demand POI", "ISC: price trading into HTF demand POI")
+alertcondition(not na(sinceSupTouch) and sinceSupTouch == 0, "Price at HTF supply POI", "ISC: price trading into HTF supply POI")
 alertcondition(bullChoch, "Bullish CHOCH", "ISC: bullish CHOCH - structure shifted up")
 alertcondition(bearChoch, "Bearish CHOCH", "ISC: bearish CHOCH - structure shifted down")
 alertcondition(bullLS or asiaLoGrab, "Sell-side liquidity swept", "ISC: sell-side liquidity swept (inducement cleared)")
@@ -390,20 +527,24 @@ alertcondition(bullSMT, "Bullish SMT", "ISC: bullish SMT divergence")
 alertcondition(bearSMT, "Bearish SMT", "ISC: bearish SMT divergence")
 
 // --------------------- Status table ------------------------------------------
-var table tbl = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 60))
+var table tbl = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 60))
 
 if showTbl and barstate.islast
     table.cell(tbl, 0, 0, "ISC 1.0", text_color = color.white, text_size = size.small, bgcolor = color.new(color.purple, 40))
     table.cell(tbl, 1, 0, "MSNRUZ", text_color = color.white, text_size = size.small, bgcolor = color.new(color.purple, 40))
-    table.cell(tbl, 0, 1, "Trend", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 1, trend == 1 ? "Bullish" : trend == -1 ? "Bearish" : "Neutral", text_color = trend == 1 ? bullCol : trend == -1 ? bearCol : color.gray, text_size = size.tiny)
-    table.cell(tbl, 0, 2, "QT phase", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 2, phase + " / " + sessName, text_color = phase == "M" ? color.orange : phase == "D" ? bullCol : color.gray, text_size = size.tiny)
-    table.cell(tbl, 0, 3, "Kill zone", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 3, inAsia ? "Asia range" : inLondon ? "London KZ" : inNY ? "New York KZ" : "-", text_color = inAsia or inLondon or inNY ? color.white : color.gray, text_size = size.tiny)
-    table.cell(tbl, 0, 4, "SMT bias", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 4, smtBias == 1 ? "Bullish" : smtBias == -1 ? "Bearish" : "-", text_color = smtBias == 1 ? bullCol : smtBias == -1 ? bearCol : color.gray, text_size = size.tiny)
-    table.cell(tbl, 0, 5, "Inducement", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 5, freshBullSweep ? "Bull cleared" : freshBearSweep ? "Bear cleared" : "-", text_color = freshBullSweep ? bullCol : freshBearSweep ? bearCol : color.gray, text_size = size.tiny)
-    table.cell(tbl, 0, 6, "Zones", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 6, str.tostring(array.size(zoneBoxes)), text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 1, "HTF (" + htfTF + ")", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 1, hTrendH == 1 ? "Bullish" : hTrendH == -1 ? "Bearish" : "Unknown", text_color = hTrendH == 1 ? bullCol : hTrendH == -1 ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 2, "HTF POI", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 2, demPOIOK ? "Demand active" : supPOIOK ? "Supply active" : "-", text_color = demPOIOK ? bullCol : supPOIOK ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 3, "LTF trend", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 3, trend == 1 ? "Bullish" : trend == -1 ? "Bearish" : "Neutral", text_color = trend == 1 ? bullCol : trend == -1 ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 4, "QT phase", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 4, phase + " / " + sessName, text_color = phase == "M" ? color.orange : phase == "D" ? bullCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 5, "Kill zone", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 5, inAsia ? "Asia range" : inLondon ? "London KZ" : inNY ? "New York KZ" : "-", text_color = inAsia or inLondon or inNY ? color.white : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 6, "SMT bias", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 6, smtBias == 1 ? "Bullish" : smtBias == -1 ? "Bearish" : "-", text_color = smtBias == 1 ? bullCol : smtBias == -1 ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 7, "Inducement", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 7, freshBullSweep ? "Bull cleared" : freshBearSweep ? "Bear cleared" : "-", text_color = freshBullSweep ? bullCol : freshBearSweep ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 8, "Zones", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 8, str.tostring(array.size(zoneBoxes)), text_color = color.gray, text_size = size.tiny)

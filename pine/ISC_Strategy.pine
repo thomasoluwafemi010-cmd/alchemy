@@ -3,27 +3,35 @@
 //  ISC 1.0 STRATEGY - MSNR x SMC x LiT [MSNRUZ]
 //  Backtestable companion to the ISC Confluence indicator.
 //
-//  Entry model (ISC 1.0 ebook, pp.11-24):
-//    1. Liquidity sweep = inducement cleared   ("Every POI must be preceded
-//       by inducement", p.14) - tracked as "sweep age"
-//    2. CHOCH / BOS in the trade direction after the sweep
-//    3. Optional confluence filters: ICT Kill Zone window, AMDX phase (M/D),
-//       SMT divergence with a correlated symbol
-//    -> Enter on close. SL beyond the sweep wick (+ ATR buffer).
-//       TP = RR multiple of risk (book trades target ~1.5-3.2 RR).
-//       Optional exit on opposite CHOCH.
+//  STRICT TOP-DOWN ANALYSIS (p.16):
+//    0. HTF bias  : structure trend on the higher timeframe sets direction
+//    1. HTF POI   : price must trade into the HTF MSNR zone (demand/supply)
+//    2. ERL       : external range liquidity must lie in the trade direction
+//    3. LTF entry : liquidity sweep (inducement) -> CHOCH / BOS -> entry
+//    + optional confluence: ICT Kill Zone, AMDX phase, SMT divergence
+//
+//  Risk model: SL beyond the sweep wick (+ ATR buffer), TP = RR multiple of
+//  risk (book trades target ~1.5-3.2 RR), fixed % risk position sizing.
 //
 //  Best on M1-M15 (book examples are XAUUSD 1M/15M).
-//  Requires an intraday timeframe for KZ / AMDX filters.
 //  Backtest results are hypothetical - not financial advice.
 // =============================================================================
 strategy("ISC 1.0 Strategy - MSNR x SMC x LiT [MSNRUZ]", "ISC Strategy", overlay = true, initial_capital = 10000, currency = currency.USD, commission_type = strategy.commission.percent, commission_value = 0.02, slippage = 2, process_orders_on_close = true, calc_on_every_tick = false, max_labels_count = 500)
 
 // ----------------------------- Inputs ----------------------------------------
+grpTD   = "0) Top-Down - HTF bias / POI / ERL (p.16)"
 grpCore = "Core engine"
 grpRisk = "Risk / exits"
-grpFlt   = "Confluence filters"
-grpRng   = "Backtest range"
+grpFlt  = "LTF confluence filters"
+grpRng  = "Backtest range"
+
+useHTF     = input.bool(true, "STRICT top-down: HTF bias + HTF POI + ERL required", group = grpTD, tooltip = "Entries only fire in the HTF trend direction, while price is interacting with the HTF POI zone, and with ERL (external range liquidity) lying in the trade direction (p.16).")
+htfMode    = input.string("Auto", "Higher timeframe", options = ["Auto", "15", "30", "60", "120", "240", "D", "W", "M"], group = grpTD, tooltip = "Auto follows the book's p.16 mapping: M1/M5 -> H1, M15 -> H4, H1/H4 -> D1, above -> W")
+htfSwing   = input.int(10, "HTF swing length (bias structure)", minval = 2, group = grpTD)
+htfZone    = input.int(20, "HTF zone length (POI pivots)", minval = 2, group = grpTD)
+htfZoneW   = input.float(0.05, "HTF POI thickness (% of price)", minval = 0.0, step = 0.01, group = grpTD)
+erlLen     = input.int(20, "ERL lookback (HTF bars)", minval = 5, group = grpTD)
+poiWindow  = input.int(12, "HTF POI valid for N chart bars after touch", minval = 1, group = grpTD)
 
 swingLen   = input.int(10, "Swing length (structure & liquidity)", minval = 2, group = grpCore)
 confWindow = input.int(15, "Sweep valid for N bars before CHOCH", minval = 1, group = grpCore)
@@ -50,6 +58,84 @@ endTime   = input.time(timestamp("2027-01-01T00:00:00"), "End", group = grpRng)
 
 bullCol = #089981
 bearCol = #f23645
+
+// --------------------- 0) Top-Down: HTF bias / POI / ERL (p.16) --------------
+// Book mapping (p.16): D1 POI -> entry H4/H1 - H4 POI -> entry M15/M5
+//                     H1 POI -> entry M5/M1 - M15 POI -> entry M1
+f_autoHtf() =>
+    s = timeframe.in_seconds(timeframe.period)
+    s <= 300 ? "60" : s <= 900 ? "240" : s <= 14400 ? "D" : "W"
+
+f_htfTF() =>
+    string tf = f_autoHtf()
+    if htfMode != "Auto"
+        if timeframe.in_seconds(htfMode) > timeframe.in_seconds(timeframe.period)
+            tf := htfMode
+    tf
+
+simple string htfTF = f_htfTF()
+
+// Runs entirely in the HTF context via request.security:
+//   hTrend : HTF structure trend (1 bull / -1 bear / 0 unknown)  -> bias
+//   demand / supply zones from the latest HTF pivots             -> POI
+//   ERL : highest high / lowest low of last erlLen HTF bars      -> draw
+f_htfAnalysis() =>
+    var int   hTrend  = 0
+    var float hRefH   = na
+    var float hRefL   = na
+    float hPH = ta.pivothigh(high, htfSwing, htfSwing)
+    float hPL = ta.pivotlow(low, htfSwing, htfSwing)
+    if not na(hPH)
+        hRefH := hPH
+    if not na(hPL)
+        hRefL := hPL
+    if not na(hRefH) and close > hRefH
+        hTrend := 1
+        hRefH := na
+    if not na(hRefL) and close < hRefL
+        hTrend := -1
+        hRefL := na
+    var float hLastPL = na
+    var float hLastPH = na
+    float zPL = ta.pivotlow(low, htfZone, htfZone)
+    float zPH = ta.pivothigh(high, htfZone, htfZone)
+    if not na(zPL)
+        hLastPL := zPL
+    if not na(zPH)
+        hLastPH := zPH
+    float zw = close * htfZoneW / 100.0
+    [hTrend, hLastPL + zw, hLastPL - zw, hLastPH + zw, hLastPH - zw, ta.highest(high, erlLen), ta.lowest(low, erlLen)]
+
+[hTrendH, hDemTop, hDemBot, hSupTop, hSupBot, hErlUp, hErlDn] = request.security(syminfo.tickerid, htfTF, f_htfAnalysis())
+
+// POI interaction state (chart timeframe):
+//   touch  = wick into the zone while close holds outside-broken side
+//   broken = close beyond the far edge -> zone invalid until a new one forms
+var int sinceDemTouch = na
+var int sinceSupTouch = na
+
+if not na(hDemBot)
+    if close < hDemBot
+        sinceDemTouch := na
+    else if low <= hDemTop
+        sinceDemTouch := 0
+    else if not na(sinceDemTouch)
+        sinceDemTouch += 1
+
+if not na(hSupTop)
+    if close > hSupTop
+        sinceSupTouch := na
+    else if high >= hSupBot
+        sinceSupTouch := 0
+    else if not na(sinceSupTouch)
+        sinceSupTouch += 1
+
+bool htfLongOK  = not useHTF or hTrendH == 1
+bool htfShortOK = not useHTF or hTrendH == -1
+bool demPOIOK   = not useHTF or (not na(sinceDemTouch) and sinceDemTouch <= poiWindow)
+bool supPOIOK   = not useHTF or (not na(sinceSupTouch) and sinceSupTouch <= poiWindow)
+bool erlLongOK  = not useHTF or na(hErlUp) or hErlUp > close
+bool erlShortOK = not useHTF or na(hErlDn) or hErlDn < close
 
 // --------------------- SMC structure -----------------------------------------
 ph = ta.pivothigh(high, swingLen, swingLen)
@@ -198,13 +284,15 @@ if not na(ph)
     prevLocalPH := ph
 
 // --------------------- Signal + filters --------------------------------------
+// Strict top-down order: HTF bias -> HTF POI -> ERL room -> sweep (inducement)
+//                        -> CHOCH/BOS -> optional KZ / AMDX / SMT filters
 bool kzOK   = not useKZ or inLondon or inNY
 bool amdxOK = not useAMDX or phase == "M" or phase == "D"
 bool smtOKL = not useSMT or smtBias == 1
 bool smtOKS = not useSMT or smtBias == -1
 
-bool longSignal  = ((bullChoch and freshBullSweep) or (bullLS and trend == 1)) and kzOK and amdxOK and smtOKL
-bool shortSignal = ((bearChoch and freshBearSweep) or (bearLS and trend == -1)) and kzOK and amdxOK and smtOKS
+bool longSignal  = ((bullChoch and freshBullSweep) or (bullLS and trend == 1)) and htfLongOK and demPOIOK and erlLongOK and kzOK and amdxOK and smtOKL
+bool shortSignal = ((bearChoch and freshBearSweep) or (bearLS and trend == -1)) and htfShortOK and supPOIOK and erlShortOK and kzOK and amdxOK and smtOKS
 
 bool allowLong  = dirIn != "Short only"
 bool allowShort = dirIn != "Long only"

@@ -25,6 +25,14 @@ The book teaches a confluence trading system — **MSNR × SMC × LiT × ICT Kil
 
 ## What each module does (mapped to the book)
 
+### 0) Top-Down — HTF bias / POI / ERL (p. 16) — `STRICT, ON by default`
+The book's top-down entry mapping (p. 16) is enforced as a hard gate before any LTF logic:
+- **HTF bias** — structure trend (HH/HL vs LH/LL chain) computed on a higher timeframe; longs only in a bullish HTF, shorts only in a bearish HTF.
+- **HTF POI** — demand/supply zone built from the latest HTF pivots (green/red boxes on the chart). A signal is only valid while price is *interacting* with the HTF POI (wick touched within the last N bars and the zone not closed through). "D1 POI → entry H4/H1 · H4 POI → entry M15/M5 · H1 POI → entry M5/M1 · M15 POI → entry M1".
+- **ERL (External Range Liquidity)** — highest high / lowest low of the last N HTF bars (dashed gray lines). The signal direction must point toward ERL (room to run).
+- **Auto HTF mapping** follows the book: M1/M5 → H1 · M15 → H4 · H1/H4 → D1 · above → W (manual override available).
+- Disable "STRICT top-down" in settings to revert to pure LTF mode.
+
 ### 1) SMC — Market Structure (pp. 11–12)
 - Labels swings **HH / HL / LH / LL** from pivot points.
 - **BOS** = break of structure in trend direction (continuation).
@@ -60,16 +68,22 @@ The book teaches a confluence trading system — **MSNR × SMC × LiT × ICT Kil
 - Bias shown in the status table; optional filter for signals.
 
 ### 7) Confluence entry signal
-**Long** = sell-side liquidity swept (inducement cleared) **→** bullish CHOCH/BOS **→** filters aligned (Kill Zone / AMDX / SMT as enabled).
-**Short** = mirror logic.
+The analysis runs in the book's strict top-down order:
 
-Alerts included for: Long/Short entries, CHOCH both directions, liquidity sweeps, SMT divergences.
+1. **HTF bias** bullish/bearish? (only trade that direction)
+2. Price trading into the **HTF POI** zone?
+3. **ERL** lying in the trade direction?
+4. **Sweep** — liquidity taken (inducement cleared, must precede the POI reaction)
+5. **CHOCH / BOS** in the trade direction
+6. Optional filters: Kill Zone window, AMDX phase (M/D), SMT agreement
+
+All true → **ISC LONG / ISC SHORT**. Alerts included for every step: HTF bias flips, price-at-HTF-POI, sweeps, CHOCH, SMT, and the final entries.
 
 ---
 
 ## Strategy version (backtesting)
 
-Same engine, plus:
+Same engine **with strict top-down enforcement on by default** (HTF bias + HTF POI + ERL gates before every entry — can be disabled in settings), plus:
 
 - **Entry**: on the close of the signal bar (`process_orders_on_close`).
 - **Stop loss**: beyond the sweep wick + an ATR buffer (default 0.25 × ATR(14)) — the book's tight SL style (examples: 5–15 pips on gold).
@@ -85,6 +99,7 @@ Suggested first test: XAUUSD 1m or 5m, defaults on, then experiment with the Kil
 ## Honest notes & limitations
 
 - **Pivots confirm with delay** (by design). A swing is only recognized `swingLen` bars after it forms — same as a human drawing structure. No repaint tricks are used.
+- **Top-down approximation** — HTF bias/POI/ERL come from `request.security` on a higher timeframe; values confirm at HTF bar close (no lookahead). The HTF POI is implemented as the zone around the latest HTF pivot — a faithful but simplified proxy for the book's discretionary POI/OB/quasimodo selection.
 - **Inducement is approximated** as a liquidity sweep of a registered swing. The book's full POI/OB methodology (order blocks, quasimodo, OCL) is partly discretionary; sweeps + CHOCH capture its entry sequence.
 - **SMT timing is approximate**: the correlated pair's last two pivots are compared with the local pivot event (bars may not align perfectly).
 - Session/KZ/AMDX features need an **intraday chart** (M1–H1).
