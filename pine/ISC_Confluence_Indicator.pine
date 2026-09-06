@@ -1,0 +1,409 @@
+//@version=6
+// =============================================================================
+//  ISC 1.0 - INTELLIGENT STRATEGIES CONNOISSEUR TRADER [MSNRUZ]
+//  Confluence indicator built from the ISC 1.0 ebook (51 pages, msnr.uz)
+//
+//  Modules implemented (book page references):
+//    1) SMC  - Market Structure : HH/HL/LH/LL, BOS, CHOCH        (pp. 11-12)
+//    2) MSNR - Key Zones        : S/R zones, RBS / SBR flips     (pp. 3-5)
+//    3) LiT  - Liquidity        : Liquidity Sweeps (inducement)  (pp. 13-16)
+//    4) ICT  - Kill Zones       : Asia Range box, London / NY KZ (pp. 26-28)
+//    5) QT   - Quarterly Theory : AMDX 90-minute micro cycles    (pp. 35-38)
+//    6) SMT  - Divergence       : correlated pair confirmation   (pp. 46-49)
+//    7) Confluence entry signals + alerts
+//
+//  Core ISC logic encoded (p. 13-16):
+//    liquidity sweep (inducement cleared)  ->  CHOCH / BOS  ->  entry
+//    "Every POI must be preceded by inducement."
+//
+//  Use on INTRADAY timeframes (M1-H1) for sessions / AMDX features.
+//  Educational tool only - not financial advice.
+// =============================================================================
+indicator("ISC 1.0 - Intelligent Strategies Connoisseur Trader [MSNRUZ]", "ISC Confluence", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ----------------------------- Inputs ----------------------------------------
+grpG   = "Display"
+grpSMC  = "1) SMC - Market Structure (pp.11-12)"
+grpMSNR = "2) MSNR - Key Zones (pp.3-5)"
+grpLiT  = "3) LiT - Liquidity / Inducement (pp.13-16)"
+grpICT  = "4) ICT - Kill Zones (pp.26-28)"
+grpQT   = "5) QT - Quarterly Theory AMDX (pp.35-38)"
+grpSMT  = "6) SMT - Divergence (pp.46-49)"
+grpSig  = "7) Confluence Signals"
+
+showStructure = input.bool(true, "Structure: HH/HL/LH/LL + BOS + CHOCH", group = grpSMC)
+swingLen      = input.int(10, "Swing length (structure & liquidity)", minval = 2, group = grpSMC)
+bullCol       = input.color(#089981, "Bull", inline = "c1", group = grpSMC)
+bearCol       = input.color(#f23645, "Bear", inline = "c1", group = grpSMC)
+
+showZones = input.bool(true, "MSNR S/R zones with RBS / SBR flips", group = grpMSNR)
+zoneLen   = input.int(20, "Zone swing length", minval = 2, group = grpMSNR)
+zoneWidth = input.float(0.05, "Zone thickness (% of price)", minval = 0.0, step = 0.01, group = grpMSNR)
+zoneMaxAge = input.int(400, "Zone stays active for N bars", minval = 50, group = grpMSNR)
+zoneMaxCnt = input.int(8, "Max simultaneous zones", minval = 1, maxval = 20, group = grpMSNR)
+
+showLiT    = input.bool(true, "Liquidity sweep labels (LS)", group = grpLiT)
+liqMemory  = input.int(300, "Liquidity memory (bars)", minval = 50, group = grpLiT)
+confWindow = input.int(15, "Sweep valid for N bars before CHOCH", minval = 1, group = grpLiT)
+
+showKZ      = input.bool(true, "Kill-zone shading + Asia range", group = grpICT)
+sessTz      = input.string("UTC+1", "Session timezone", options = ["UTC+1", "UTC", "Europe/London", "America/New_York"], group = grpICT)
+asiaSess    = input.session("0100-0500", "Asia Range session", group = grpICT)
+londonSess  = input.session("0700-1000", "London Kill Zone", group = grpICT)
+nySess      = input.session("1300-1600", "New York Kill Zone", group = grpICT)
+showAsiaBox = input.bool(true, "Draw Asia range box + H/L liquidity lines", group = grpICT)
+
+showQT   = input.bool(true, "AMDX 90-min cycle labels", group = grpQT)
+qtTz     = input.string("UTC+1", "Cycle timezone", options = ["UTC+1", "UTC", "Europe/London", "America/New_York"], group = grpQT)
+showTbl  = input.bool(true, "Status table", group = grpG)
+
+useSMT  = input.bool(true, "SMT divergence (needs correlated symbol)", group = grpSMT)
+corrSym = input.symbol("XAGUSD", "Correlated symbol (XAU->XAG, EUR->GBP ...)", group = grpSMT)
+
+reqKZ   = input.bool(false, "Signals only inside Kill Zones", group = grpSig)
+reqAMDX = input.bool(false, "Signals only in M or D phase (AMDX)", group = grpSig)
+reqSMT  = input.bool(false, "Signals only with SMT agreement", group = grpSig)
+
+// --------------------- 1) SMC - Market Structure (pp.11-12) ------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var int   trend      = 0      //  1 = bullish, -1 = bearish
+var float refHigh    = na     //  most recent swing high awaiting break
+var int   refHighBar = na
+var float refLow     = na
+var int   refLowBar  = na
+var float lastPH     = na
+var float lastPL     = na
+
+bool bullBreak = not na(refHigh) and close > refHigh
+bool bearBreak = not na(refLow) and close < refLow
+bool bullChoch = bullBreak and trend == -1
+bool bearChoch = bearBreak and trend == 1
+
+if bullBreak
+    if showStructure
+        line.new(refHighBar, refHigh, bar_index, refHigh, color = bullChoch ? bullCol : color.new(bullCol, 45), style = line.style_dashed)
+        label.new(bar_index, refHigh, bullChoch ? "CHOCH" : "BOS", style = label.style_label_down, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny)
+    trend := 1
+    refHigh := na
+    refHighBar := na
+
+if bearBreak
+    if showStructure
+        line.new(refLowBar, refLow, bar_index, refLow, color = bearChoch ? bearCol : color.new(bearCol, 45), style = line.style_dashed)
+        label.new(bar_index, refLow, bearChoch ? "CHOCH" : "BOS", style = label.style_label_up, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny)
+    trend := -1
+    refLow := na
+    refLowBar := na
+
+// --------------------- 3) LiT - liquidity registers (pp.13-16) ---------------
+var float[] liqHighs    = array.new_float()
+var int[]   liqHighBars = array.new_int()
+var float[] liqLows     = array.new_float()
+var int[]   liqLowBars  = array.new_int()
+
+// pivot events (after break checks so a fresh pivot is not consumed same bar)
+if not na(ph)
+    if showStructure
+        label.new(bar_index - swingLen, ph, na(lastPH) or ph > lastPH ? "HH" : "LH", style = label.style_none, textcolor = color.gray, size = size.tiny)
+    lastPH := ph
+    refHigh := ph
+    refHighBar := bar_index - swingLen
+    array.push(liqHighs, ph)
+    array.push(liqHighBars, bar_index - swingLen)
+
+if not na(pl)
+    if showStructure
+        label.new(bar_index - swingLen, pl, na(lastPL) or pl < lastPL ? "LL" : "HL", style = label.style_none, textcolor = color.gray, size = size.tiny)
+    lastPL := pl
+    refLow := pl
+    refLowBar := bar_index - swingLen
+    array.push(liqLows, pl)
+    array.push(liqLowBars, bar_index - swingLen)
+
+// prune registers by age / size
+while array.size(liqHighs) > 0 and (bar_index - array.get(liqHighBars, 0) > liqMemory or array.size(liqHighs) > 30)
+    array.shift(liqHighs)
+    array.shift(liqHighBars)
+
+while array.size(liqLows) > 0 and (bar_index - array.get(liqLowBars, 0) > liqMemory or array.size(liqLows) > 30)
+    array.shift(liqLows)
+    array.shift(liqLowBars)
+
+// sweep scan: wick beyond a swing level, close back inside = liquidity taken
+bool bullLS = false
+bool bearLS = false
+
+if array.size(liqLows) > 0
+    for i = array.size(liqLows) - 1 to 0 by -1
+        lvl = array.get(liqLows, i)
+        if close < lvl
+            array.remove(liqLows, i)
+            array.remove(liqLowBars, i)
+        else if low < lvl and close > lvl
+            bullLS := true
+            array.remove(liqLows, i)
+            array.remove(liqLowBars, i)
+            break
+
+if array.size(liqHighs) > 0
+    for i = array.size(liqHighs) - 1 to 0 by -1
+        lvl = array.get(liqHighs, i)
+        if close > lvl
+            array.remove(liqHighs, i)
+            array.remove(liqHighBars, i)
+        else if high > lvl and close < lvl
+            bearLS := true
+            array.remove(liqHighs, i)
+            array.remove(liqHighBars, i)
+            break
+
+// sweep age tracking (an inducement must precede the POI - p.14)
+var int   bullSweepAge  = na
+var float bullSweepLow  = na
+var int   bearSweepAge  = na
+var float bearSweepHigh = na
+
+if bullLS
+    bullSweepAge := 0
+    bullSweepLow := low
+    if showLiT
+        label.new(bar_index, low, "LS", style = label.style_label_up, color = color.new(bullCol, 30), textcolor = color.white, size = size.tiny)
+else if not na(bullSweepAge)
+    bullSweepAge += 1
+
+if bearLS
+    bearSweepAge := 0
+    bearSweepHigh := high
+    if showLiT
+        label.new(bar_index, high, "LS", style = label.style_label_down, color = color.new(bearCol, 30), textcolor = color.white, size = size.tiny)
+else if not na(bearSweepAge)
+    bearSweepAge += 1
+
+bool freshBullSweep = not na(bullSweepAge) and bullSweepAge <= confWindow
+bool freshBearSweep = not na(bearSweepAge) and bearSweepAge <= confWindow
+
+// --------------------- 2) MSNR - Key Zones (pp.3-5) --------------------------
+phZ = ta.pivothigh(high, zoneLen, zoneLen)
+plZ = ta.pivotlow(low, zoneLen, zoneLen)
+
+var box[]   zoneBoxes = array.new_box()
+var int[]   zoneRole  = array.new_int()    //  1 = resistance, -1 = support
+var int[]   zoneBorn  = array.new_int()
+var bool[]  zoneAlive = array.new_bool()
+
+float zoneW = close * zoneWidth / 100.0
+
+if not na(phZ) and showZones
+    array.push(zoneBoxes, box.new(bar_index - zoneLen, phZ + zoneW, bar_index, phZ - zoneW, border_color = color.new(bearCol, 40), bgcolor = color.new(bearCol, 88)))
+    array.push(zoneRole, 1)
+    array.push(zoneBorn, bar_index)
+    array.push(zoneAlive, true)
+
+if not na(plZ) and showZones
+    array.push(zoneBoxes, box.new(bar_index - zoneLen, plZ + zoneW, bar_index, plZ - zoneW, border_color = color.new(bullCol, 40), bgcolor = color.new(bullCol, 88)))
+    array.push(zoneRole, -1)
+    array.push(zoneBorn, bar_index)
+    array.push(zoneAlive, true)
+
+if array.size(zoneBoxes) > 0
+    for i = 0 to array.size(zoneBoxes) - 1
+        zb = array.get(zoneBoxes, i)
+        if array.get(zoneAlive, i)
+            float zTop = box.get_top(zb)
+            float zBot = box.get_bottom(zb)
+            int zRole  = array.get(zoneRole, i)
+            // RBS: resistance broken up -> becomes support (p.4 "Rbs")
+            if zRole == 1 and close > zTop
+                array.set(zoneRole, i, -1)
+                box.set_border_color(zb, color.new(bullCol, 40))
+                box.set_bgcolor(zb, color.new(bullCol, 88))
+                label.new(bar_index, zTop, "RBS", style = label.style_label_down, color = color.new(bullCol, 25), textcolor = color.white, size = size.tiny)
+            // SBR: support broken down -> becomes resistance (p.4 "Sbr")
+            else if zRole == -1 and close < zBot
+                array.set(zoneRole, i, 1)
+                box.set_border_color(zb, color.new(bearCol, 40))
+                box.set_bgcolor(zb, color.new(bearCol, 88))
+                label.new(bar_index, zBot, "SBR", style = label.style_label_up, color = color.new(bearCol, 25), textcolor = color.white, size = size.tiny)
+            // expiry
+            if bar_index - array.get(zoneBorn, i) > zoneMaxAge
+                array.set(zoneAlive, i, false)
+                box.set_bgcolor(zb, color.new(color.gray, 96))
+                box.set_border_color(zb, color.new(color.gray, 70))
+            else
+                box.set_right(zb, bar_index)
+
+while array.size(zoneBoxes) > zoneMaxCnt
+    box.delete(array.shift(zoneBoxes))
+    array.shift(zoneRole)
+    array.shift(zoneBorn)
+    array.shift(zoneAlive)
+
+// --------------------- 4) ICT - Kill Zones (pp.26-28) ------------------------
+bool inAsia   = not na(time(timeframe.period, asiaSess, sessTz))
+bool inLondon = not na(time(timeframe.period, londonSess, sessTz))
+bool inNY     = not na(time(timeframe.period, nySess, sessTz))
+
+var float asiaH        = na
+var float asiaL        = na
+var int   asiaStartBar = na
+var float asiaHiLvl    = na
+var float asiaLoLvl    = na
+var line  asiaHiLine   = na
+var line  asiaLoLine   = na
+
+bool asiaStart = inAsia and not inAsia[1]
+bool asiaEnd   = not inAsia and inAsia[1]
+
+if asiaStart
+    asiaH := high
+    asiaL := low
+    asiaStartBar := bar_index
+else if inAsia
+    asiaH := math.max(asiaH, high)
+    asiaL := math.min(asiaL, low)
+
+if asiaEnd and showKZ
+    asiaHiLvl := asiaH
+    asiaLoLvl := asiaL
+    if showAsiaBox
+        box.new(asiaStartBar, asiaH, bar_index, asiaL, border_color = color.new(color.purple, 50), bgcolor = color.new(color.purple, 92))
+        asiaHiLine := line.new(bar_index, asiaH, bar_index + 1, asiaH, color = color.purple, extend = extend.right, style = line.style_dotted)
+        asiaLoLine := line.new(bar_index, asiaL, bar_index + 1, asiaL, color = color.purple, extend = extend.right, style = line.style_dotted)
+
+// Asia liquidity grab (pp.26-27): London/NY takes Asia high/low, then reverses
+bool asiaLoGrab = showKZ and not inAsia and not na(asiaLoLvl) and low < asiaLoLvl and close > asiaLoLvl
+bool asiaHiGrab = showKZ and not inAsia and not na(asiaHiLvl) and high > asiaHiLvl and close < asiaHiLvl
+
+if asiaLoGrab
+    bullSweepAge := 0
+    bullSweepLow := math.min(low, asiaLoLvl)
+    asiaLoLvl := na
+    if not na(asiaLoLine)
+        line.set_extend(asiaLoLine, extend.none)
+        line.set_x2(asiaLoLine, bar_index)
+    label.new(bar_index, low, "Asia LS", style = label.style_label_up, color = color.new(bullCol, 25), textcolor = color.white, size = size.tiny)
+
+if asiaHiGrab
+    bearSweepAge := 0
+    bearSweepHigh := math.max(high, asiaHiLvl)
+    asiaHiLvl := na
+    if not na(asiaHiLine)
+        line.set_extend(asiaHiLine, extend.none)
+        line.set_x2(asiaHiLine, bar_index)
+    label.new(bar_index, high, "Asia LS", style = label.style_label_down, color = color.new(bearCol, 25), textcolor = color.white, size = size.tiny)
+
+bgcolor(showKZ and inAsia ? color.new(color.purple, 94) : showKZ and inLondon ? color.new(color.blue, 94) : showKZ and inNY ? color.new(color.green, 94) : na, title = "Kill zones")
+
+// --------------------- 5) QT - Quarterly Theory AMDX (pp.35-38) --------------
+// Micro cycle: 90-minute phases repeating A-M-D-X through the day.
+// Sessions: Asia 00-06 (A), London 06-12 (M), NY AM 12-18 (D), NY PM 18-24 (X).
+f_phase(_t) =>
+    m = hour(_t, qtTz) * 60 + minute(_t, qtTz)
+    idx = int(math.floor(m / 90.0)) % 4
+    idx == 0 ? "A" : idx == 1 ? "M" : idx == 2 ? "D" : "X"
+
+f_session(_t) =>
+    h = hour(_t, qtTz)
+    h < 6 ? "Asia" : h < 12 ? "London" : h < 18 ? "NY AM" : "NY PM"
+
+string phase = f_phase(time)
+string sessName = f_session(time)
+
+var string lastPhaseLbl = na
+if showQT and (na(lastPhaseLbl) or phase != lastPhaseLbl)
+    label.new(bar_index, na, phase, yloc = yloc.belowbar, style = label.style_none, textcolor = phase == "M" ? color.orange : phase == "D" ? bullCol : color.gray, size = size.tiny)
+    lastPhaseLbl := phase
+
+// --------------------- 6) SMT - Divergence (pp.46-49) ------------------------
+// "Whoever does NOT take liquidity owns the direction."
+corrLowSrc  = request.security(corrSym, timeframe.period, low)
+corrHighSrc = request.security(corrSym, timeframe.period, high)
+plC = ta.pivotlow(corrLowSrc, swingLen, swingLen)
+phC = ta.pivothigh(corrHighSrc, swingLen, swingLen)
+
+var float[] corrPLVals = array.new_float()
+var float[] corrPHVals = array.new_float()
+
+if not na(plC)
+    array.push(corrPLVals, plC)
+    if array.size(corrPLVals) > 4
+        array.shift(corrPLVals)
+
+if not na(phC)
+    array.push(corrPHVals, phC)
+    if array.size(corrPHVals) > 4
+        array.shift(corrPHVals)
+
+var int   smtBias     = 0
+var float prevLocalPL = na
+var float prevLocalPH = na
+bool bullSMT = false
+bool bearSMT = false
+
+// local LL + correlated HL -> bullish SMT (direction on local symbol)
+if not na(pl)
+    bool localLL = not na(prevLocalPL) and pl < prevLocalPL
+    bool corrHL  = array.size(corrPLVals) >= 2 and array.get(corrPLVals, array.size(corrPLVals) - 1) > array.get(corrPLVals, array.size(corrPLVals) - 2)
+    if useSMT and localLL and corrHL
+        bullSMT := true
+        smtBias := 1
+        label.new(bar_index - swingLen, pl, "SMT", style = label.style_label_up, color = color.new(bullCol, 25), textcolor = color.white, size = size.tiny)
+    prevLocalPL := pl
+
+// local HH + correlated LH -> bearish SMT
+if not na(ph)
+    bool localHH = not na(prevLocalPH) and ph > prevLocalPH
+    bool corrLH  = array.size(corrPHVals) >= 2 and array.get(corrPHVals, array.size(corrPHVals) - 1) < array.get(corrPHVals, array.size(corrPHVals) - 2)
+    if useSMT and localHH and corrLH
+        bearSMT := true
+        smtBias := -1
+        label.new(bar_index - swingLen, ph, "SMT", style = label.style_label_down, color = color.new(bearCol, 25), textcolor = color.white, size = size.tiny)
+    prevLocalPH := ph
+
+// --------------------- 7) Confluence signals (p.2, p.11) ---------------------
+// Long : sell-side sweep (inducement) then bullish CHOCH / BOS, filters aligned
+// Short: buy-side sweep (inducement) then bearish CHOCH / BOS, filters aligned
+bool kzOK   = not reqKZ or inLondon or inNY
+bool amdxOK = not reqAMDX or phase == "M" or phase == "D"
+bool smtOKL = not reqSMT or smtBias == 1
+bool smtOKS = not reqSMT or smtBias == -1
+
+bool longSignal  = ((bullChoch and freshBullSweep) or (bullLS and trend == 1)) and kzOK and amdxOK and smtOKL
+bool shortSignal = ((bearChoch and freshBearSweep) or (bearLS and trend == -1)) and kzOK and amdxOK and smtOKS
+
+if longSignal
+    label.new(bar_index, low, "ISC LONG", style = label.style_label_up, color = bullCol, textcolor = color.white, size = size.small)
+
+if shortSignal
+    label.new(bar_index, high, "ISC SHORT", style = label.style_label_down, color = bearCol, textcolor = color.white, size = size.small)
+
+// --------------------- Alerts -------------------------------------------------
+alertcondition(longSignal, "ISC Long Entry", "ISC Confluence: LONG - sweep + CHOCH aligned")
+alertcondition(shortSignal, "ISC Short Entry", "ISC Confluence: SHORT - sweep + CHOCH aligned")
+alertcondition(bullChoch, "Bullish CHOCH", "ISC: bullish CHOCH - structure shifted up")
+alertcondition(bearChoch, "Bearish CHOCH", "ISC: bearish CHOCH - structure shifted down")
+alertcondition(bullLS or asiaLoGrab, "Sell-side liquidity swept", "ISC: sell-side liquidity swept (inducement cleared)")
+alertcondition(bearLS or asiaHiGrab, "Buy-side liquidity swept", "ISC: buy-side liquidity swept (inducement cleared)")
+alertcondition(bullSMT, "Bullish SMT", "ISC: bullish SMT divergence")
+alertcondition(bearSMT, "Bearish SMT", "ISC: bearish SMT divergence")
+
+// --------------------- Status table ------------------------------------------
+var table tbl = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 60))
+
+if showTbl and barstate.islast
+    table.cell(tbl, 0, 0, "ISC 1.0", text_color = color.white, text_size = size.small, bgcolor = color.new(color.purple, 40))
+    table.cell(tbl, 1, 0, "MSNRUZ", text_color = color.white, text_size = size.small, bgcolor = color.new(color.purple, 40))
+    table.cell(tbl, 0, 1, "Trend", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 1, trend == 1 ? "Bullish" : trend == -1 ? "Bearish" : "Neutral", text_color = trend == 1 ? bullCol : trend == -1 ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 2, "QT phase", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 2, phase + " / " + sessName, text_color = phase == "M" ? color.orange : phase == "D" ? bullCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 3, "Kill zone", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 3, inAsia ? "Asia range" : inLondon ? "London KZ" : inNY ? "New York KZ" : "-", text_color = inAsia or inLondon or inNY ? color.white : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 4, "SMT bias", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 4, smtBias == 1 ? "Bullish" : smtBias == -1 ? "Bearish" : "-", text_color = smtBias == 1 ? bullCol : smtBias == -1 ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 5, "Inducement", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 5, freshBullSweep ? "Bull cleared" : freshBearSweep ? "Bear cleared" : "-", text_color = freshBullSweep ? bullCol : freshBearSweep ? bearCol : color.gray, text_size = size.tiny)
+    table.cell(tbl, 0, 6, "Zones", text_color = color.gray, text_size = size.tiny)
+    table.cell(tbl, 1, 6, str.tostring(array.size(zoneBoxes)), text_color = color.gray, text_size = size.tiny)

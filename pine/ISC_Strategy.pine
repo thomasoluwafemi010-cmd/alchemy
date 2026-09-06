@@ -1,0 +1,248 @@
+//@version=6
+// =============================================================================
+//  ISC 1.0 STRATEGY - MSNR x SMC x LiT [MSNRUZ]
+//  Backtestable companion to the ISC Confluence indicator.
+//
+//  Entry model (ISC 1.0 ebook, pp.11-24):
+//    1. Liquidity sweep = inducement cleared   ("Every POI must be preceded
+//       by inducement", p.14) - tracked as "sweep age"
+//    2. CHOCH / BOS in the trade direction after the sweep
+//    3. Optional confluence filters: ICT Kill Zone window, AMDX phase (M/D),
+//       SMT divergence with a correlated symbol
+//    -> Enter on close. SL beyond the sweep wick (+ ATR buffer).
+//       TP = RR multiple of risk (book trades target ~1.5-3.2 RR).
+//       Optional exit on opposite CHOCH.
+//
+//  Best on M1-M15 (book examples are XAUUSD 1M/15M).
+//  Requires an intraday timeframe for KZ / AMDX filters.
+//  Backtest results are hypothetical - not financial advice.
+// =============================================================================
+strategy("ISC 1.0 Strategy - MSNR x SMC x LiT [MSNRUZ]", "ISC Strategy", overlay = true, initial_capital = 10000, currency = currency.USD, commission_type = strategy.commission.percent, commission_value = 0.02, slippage = 2, process_orders_on_close = true, calc_on_every_tick = false, max_labels_count = 500)
+
+// ----------------------------- Inputs ----------------------------------------
+grpCore = "Core engine"
+grpRisk = "Risk / exits"
+grpFlt   = "Confluence filters"
+grpRng   = "Backtest range"
+
+swingLen   = input.int(10, "Swing length (structure & liquidity)", minval = 2, group = grpCore)
+confWindow = input.int(15, "Sweep valid for N bars before CHOCH", minval = 1, group = grpCore)
+liqMemory  = input.int(300, "Liquidity memory (bars)", minval = 50, group = grpCore)
+
+dirIn     = input.string("Both", "Trade direction", options = ["Both", "Long only", "Short only"], group = grpRisk)
+riskPct   = input.float(1.0, "Risk per trade (% of equity)", minval = 0.1, step = 0.1, group = grpRisk)
+rrTarget  = input.float(3.0, "Take profit (RR multiple)", minval = 0.5, step = 0.1, group = grpRisk)
+atrLen    = input.int(14, "ATR length (SL buffer)", minval = 1, group = grpRisk)
+slAtrMult = input.float(0.25, "SL buffer (x ATR beyond sweep)", minval = 0.0, step = 0.05, group = grpRisk)
+closeOnChoch = input.bool(true, "Close on opposite CHOCH", group = grpRisk)
+
+useKZ   = input.bool(false, "Only trade inside Kill Zones", group = grpFlt)
+sessTz  = input.string("UTC+1", "Session timezone", options = ["UTC+1", "UTC", "Europe/London", "America/New_York"], group = grpFlt)
+londonSess = input.session("0700-1000", "London Kill Zone", group = grpFlt)
+nySess     = input.session("1300-1600", "New York Kill Zone", group = grpFlt)
+useAMDX = input.bool(false, "Only trade in M or D phase (AMDX)", group = grpFlt)
+qtTz    = input.string("UTC+1", "Cycle timezone", options = ["UTC+1", "UTC", "Europe/London", "America/New_York"], group = grpFlt)
+useSMT  = input.bool(false, "Only trade with SMT agreement", group = grpFlt)
+corrSym = input.symbol("XAGUSD", "Correlated symbol (XAU->XAG, EUR->GBP ...)", group = grpFlt)
+
+startTime = input.time(timestamp("2024-01-01T00:00:00"), "Start", group = grpRng)
+endTime   = input.time(timestamp("2027-01-01T00:00:00"), "End", group = grpRng)
+
+bullCol = #089981
+bearCol = #f23645
+
+// --------------------- SMC structure -----------------------------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var int   trend      = 0
+var float refHigh    = na
+var int   refHighBar = na
+var float refLow     = na
+var int   refLowBar  = na
+
+bool bullBreak = not na(refHigh) and close > refHigh
+bool bearBreak = not na(refLow) and close < refLow
+bool bullChoch = bullBreak and trend == -1
+bool bearChoch = bearBreak and trend == 1
+
+if bullBreak
+    trend := 1
+    refHigh := na
+    refHighBar := na
+
+if bearBreak
+    trend := -1
+    refLow := na
+    refLowBar := na
+
+// --------------------- Liquidity registers + sweeps --------------------------
+var float[] liqHighs    = array.new_float()
+var float[] liqHighBars = array.new_int()
+var float[] liqLows     = array.new_float()
+var int[]   liqLowBars  = array.new_int()
+
+if not na(ph)
+    refHigh := ph
+    refHighBar := bar_index - swingLen
+    array.push(liqHighs, ph)
+    array.push(liqHighBars, bar_index - swingLen)
+
+if not na(pl)
+    refLow := pl
+    refLowBar := bar_index - swingLen
+    array.push(liqLows, pl)
+    array.push(liqLowBars, bar_index - swingLen)
+
+while array.size(liqHighs) > 0 and (bar_index - array.get(liqHighBars, 0) > liqMemory or array.size(liqHighs) > 30)
+    array.shift(liqHighs)
+    array.shift(liqHighBars)
+
+while array.size(liqLows) > 0 and (bar_index - array.get(liqLowBars, 0) > liqMemory or array.size(liqLows) > 30)
+    array.shift(liqLows)
+    array.shift(liqLowBars)
+
+bool bullLS = false
+bool bearLS = false
+
+if array.size(liqLows) > 0
+    for i = array.size(liqLows) - 1 to 0 by -1
+        lvl = array.get(liqLows, i)
+        if close < lvl
+            array.remove(liqLows, i)
+            array.remove(liqLowBars, i)
+        else if low < lvl and close > lvl
+            bullLS := true
+            array.remove(liqLows, i)
+            array.remove(liqLowBars, i)
+            break
+
+if array.size(liqHighs) > 0
+    for i = array.size(liqHighs) - 1 to 0 by -1
+        lvl = array.get(liqHighs, i)
+        if close > lvl
+            array.remove(liqHighs, i)
+            array.remove(liqHighBars, i)
+        else if high > lvl and close < lvl
+            bearLS := true
+            array.remove(liqHighs, i)
+            array.remove(liqHighBars, i)
+            break
+
+var int   bullSweepAge  = na
+var float bullSweepLow  = na
+var int   bearSweepAge  = na
+var float bearSweepHigh = na
+
+if bullLS
+    bullSweepAge := 0
+    bullSweepLow := low
+else if not na(bullSweepAge)
+    bullSweepAge += 1
+
+if bearLS
+    bearSweepAge := 0
+    bearSweepHigh := high
+else if not na(bearSweepAge)
+    bearSweepAge += 1
+
+bool freshBullSweep = not na(bullSweepAge) and bullSweepAge <= confWindow
+bool freshBearSweep = not na(bearSweepAge) and bearSweepAge <= confWindow
+
+// --------------------- Kill zones + AMDX -------------------------------------
+bool inLondon = not na(time(timeframe.period, londonSess, sessTz))
+bool inNY     = not na(time(timeframe.period, nySess, sessTz))
+
+f_phase(_t) =>
+    m = hour(_t, qtTz) * 60 + minute(_t, qtTz)
+    idx = int(math.floor(m / 90.0)) % 4
+    idx == 0 ? "A" : idx == 1 ? "M" : idx == 2 ? "D" : "X"
+
+string phase = f_phase(time)
+
+// --------------------- SMT bias ----------------------------------------------
+corrLowSrc  = request.security(corrSym, timeframe.period, low)
+corrHighSrc = request.security(corrSym, timeframe.period, high)
+plC = ta.pivotlow(corrLowSrc, swingLen, swingLen)
+phC = ta.pivothigh(corrHighSrc, swingLen, swingLen)
+
+var float[] corrPLVals = array.new_float()
+var float[] corrPHVals = array.new_float()
+
+if not na(plC)
+    array.push(corrPLVals, plC)
+    if array.size(corrPLVals) > 4
+        array.shift(corrPLVals)
+
+if not na(phC)
+    array.push(corrPHVals, phC)
+    if array.size(corrPHVals) > 4
+        array.shift(corrPHVals)
+
+var int   smtBias     = 0
+var float prevLocalPL = na
+var float prevLocalPH = na
+
+if not na(pl)
+    bool localLL = not na(prevLocalPL) and pl < prevLocalPL
+    bool corrHL  = array.size(corrPLVals) >= 2 and array.get(corrPLVals, array.size(corrPLVals) - 1) > array.get(corrPLVals, array.size(corrPLVals) - 2)
+    if localLL and corrHL
+        smtBias := 1
+    prevLocalPL := pl
+
+if not na(ph)
+    bool localHH = not na(prevLocalPH) and ph > prevLocalPH
+    bool corrLH  = array.size(corrPHVals) >= 2 and array.get(corrPHVals, array.size(corrPHVals) - 1) < array.get(corrPHVals, array.size(corrPHVals) - 2)
+    if localHH and corrLH
+        smtBias := -1
+    prevLocalPH := ph
+
+// --------------------- Signal + filters --------------------------------------
+bool kzOK   = not useKZ or inLondon or inNY
+bool amdxOK = not useAMDX or phase == "M" or phase == "D"
+bool smtOKL = not useSMT or smtBias == 1
+bool smtOKS = not useSMT or smtBias == -1
+
+bool longSignal  = ((bullChoch and freshBullSweep) or (bullLS and trend == 1)) and kzOK and amdxOK and smtOKL
+bool shortSignal = ((bearChoch and freshBearSweep) or (bearLS and trend == -1)) and kzOK and amdxOK and smtOKS
+
+bool allowLong  = dirIn != "Short only"
+bool allowShort = dirIn != "Long only"
+bool inRange    = time >= startTime and time <= endTime
+
+float atrVal = ta.atr(atrLen)
+
+// --------------------- Orders -------------------------------------------------
+bool longTrigger  = longSignal and allowLong and inRange and strategy.position_size == 0 and not na(atrVal)
+bool shortTrigger = shortSignal and allowShort and inRange and strategy.position_size == 0 and not na(atrVal)
+
+if longTrigger
+    float entryPx = close
+    float slPx = math.min(nz(bullSweepLow, low), low) - atrVal * slAtrMult
+    float riskPx = entryPx - slPx
+    if not na(riskPx) and riskPx > 0
+        float qty = strategy.equity * (riskPct / 100.0) / riskPx
+        strategy.entry("Long", strategy.long, qty = qty)
+        strategy.exit("Long X", from_entry = "Long", stop = slPx, limit = entryPx + riskPx * rrTarget)
+        label.new(bar_index, low, "L " + str.tostring(rrTarget, "#.#") + "R", style = label.style_label_up, color = color.new(bullCol, 20), textcolor = color.white, size = size.tiny)
+        bullSweepAge := na
+
+if shortTrigger
+    float entryPx = close
+    float slPx = math.max(nz(bearSweepHigh, high), high) + atrVal * slAtrMult
+    float riskPx = slPx - entryPx
+    if not na(riskPx) and riskPx > 0
+        float qty = strategy.equity * (riskPct / 100.0) / riskPx
+        strategy.entry("Short", strategy.short, qty = qty)
+        strategy.exit("Short X", from_entry = "Short", stop = slPx, limit = entryPx - riskPx * rrTarget)
+        label.new(bar_index, high, "S " + str.tostring(rrTarget, "#.#") + "R", style = label.style_label_down, color = color.new(bearCol, 20), textcolor = color.white, size = size.tiny)
+        bearSweepAge := na
+
+if closeOnChoch and strategy.position_size > 0 and bearChoch
+    strategy.close("Long", comment = "CHOCH exit")
+
+if closeOnChoch and strategy.position_size < 0 and bullChoch
+    strategy.close("Short", comment = "CHOCH exit")
+
+plotshape(longTrigger, title = "Long entry", style = shape.triangleup, location = location.belowbar, color = bullCol, size = size.small)
+plotshape(shortTrigger, title = "Short entry", style = shape.triangledown, location = location.abovebar, color = bearCol, size = size.small)
