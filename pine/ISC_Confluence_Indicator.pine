@@ -80,18 +80,14 @@ reqSMT  = input.bool(false, "Signals only with SMT agreement", group = grpSig)
 // --------------------- 0) Top-Down: HTF bias / POI / ERL (p.16) --------------
 // Book mapping (p.16): D1 POI -> entry H4/H1 - H4 POI -> entry M15/M5
 //                     H1 POI -> entry M5/M1 - M15 POI -> entry M1
-f_autoHtf() =>
-    s = timeframe.in_seconds(timeframe.period)
-    s <= 300 ? "60" : s <= 900 ? "240" : s <= 14400 ? "D" : "W"
-
-f_htfTF() =>
-    string tf = f_autoHtf()
-    if htfMode != "Auto"
-        if timeframe.in_seconds(htfMode) > timeframe.in_seconds(timeframe.period)
-            tf := htfMode
-    tf
-
-simple string htfTF = f_htfTF()
+// Inline switch (no user-defined function) so the result stays "simple",
+// as request.security() requires for its timeframe argument.
+simple string htfTF = switch
+    htfMode != "Auto" and timeframe.in_seconds(htfMode) > timeframe.in_seconds(timeframe.period) => htfMode
+    timeframe.in_seconds(timeframe.period) <= 300  => "60"
+    timeframe.in_seconds(timeframe.period) <= 900  => "240"
+    timeframe.in_seconds(timeframe.period) <= 14400 => "D"
+    => "W"
 
 // Runs entirely in the HTF context via request.security:
 //   hTrend : HTF structure trend (1 bull / -1 bear / 0 unknown)  -> bias
